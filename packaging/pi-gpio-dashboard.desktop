@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Pi & GPIO Dashboard
+Comment=Live Raspberry Pi 5 and Keyestudio T-type shield status
+Exec=/usr/bin/python3 @APP_DIR@/pi_gpio_dashboard.py
+Path=@APP_DIR@
+Icon=@APP_DIR@/assets/pi-gpio-dashboard.svg
+Terminal=false
+Categories=System;

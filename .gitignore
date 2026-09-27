@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+*.log
+*.png
+*.jpg
+*.jpeg
+*.pdf
+pin_labels.json
+*.pem
+*.key
+id_*
