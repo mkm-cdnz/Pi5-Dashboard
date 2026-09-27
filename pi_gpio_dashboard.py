@@ -11,7 +11,7 @@ import subprocess
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import messagebox
 
@@ -64,6 +64,85 @@ POWER = "#f5c96e"
 GROUND = "#a9b6c3"
 ERROR = "#ff9b96"
 LABELS_FILE = Path.home() / ".config" / "pi-gpio-dashboard" / "pin_labels.json"
+BRIDGE_DIR = LABELS_FILE.parent / "bridge"
+DESIGN_FILE = BRIDGE_DIR / "design_intent.json"
+SNAPSHOT_FILE = BRIDGE_DIR / "bench_snapshot.json"
+DESIGN_FIELDS = {
+    "custom_label", "project_id", "direction", "signal_type", "voltage_logic",
+    "bom_component_id", "bom_component_name", "code_variable", "color_tag",
+    "safety_warning",
+}
+
+
+def write_json_atomic(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    try:
+        temporary.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+                             encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def load_design_intent(path: Path = DESIGN_FILE) -> dict[int, dict[str, object]]:
+    if path.stat().st_size > 256_000:
+        raise ValueError("Design intent exceeds 256 KB")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict) or not isinstance(raw.get("meta"), dict):
+        raise ValueError("Expected an object with meta and pins")
+    if raw["meta"].get("sync_version") != "1.0" or not isinstance(raw.get("pins"), dict):
+        raise ValueError("Expected sync_version 1.0 and a pins object")
+    result: dict[int, dict[str, object]] = {}
+    for key, fields in raw["pins"].items():
+        if not isinstance(key, str) or not key.isdecimal() or not 1 <= int(key) <= 40:
+            raise ValueError(f"Invalid physical pin: {key}")
+        pin = PINS[int(key) - 1]
+        if not isinstance(fields, dict):
+            raise ValueError(f"Pin {key} must be an object")
+        bcm = fields.get("bcm", pin.bcm)
+        if bcm != pin.bcm or isinstance(bcm, bool):
+            raise ValueError(f"BCM mismatch on physical pin {key}")
+        clean: dict[str, object] = {"bcm": pin.bcm}
+        for name, value in fields.items():
+            if name == "bcm":
+                continue
+            if name not in DESIGN_FIELDS or not isinstance(value, str) or len(value) > 240:
+                raise ValueError(f"Invalid {name} on physical pin {key}")
+            if name == "color_tag" and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+                raise ValueError(f"Invalid color_tag on physical pin {key}")
+            clean[name] = " ".join(value.split())
+        result[pin.number] = clean
+    return result
+
+
+def build_bench_snapshot(states: dict[int, dict[str, str]], labels: dict[int, str],
+                         design: dict[int, dict[str, object]],
+                         cpu_temp_c: float | None = None) -> dict[str, object]:
+    pins: dict[str, dict[str, object]] = {}
+    for pin in PINS:
+        state = states.get(pin.bcm, {}) if pin.bcm is not None else {}
+        level = {"hi": 1, "lo": 0}.get(state.get("level"))
+        intent = design.get(pin.number, {})
+        pins[str(pin.number)] = {
+            "bcm": pin.bcm,
+            "silkscreen_label": pin.label,
+            "design_intent": dict(intent) if intent else None,
+            "design_label": intent.get("custom_label"),
+            "user_override_label": labels.get(pin.number),
+            "actual_mode": state.get("function"),
+            "actual_pull": state.get("pull"),
+            "live_logic_level": level,
+            "hardware_connected": None,
+            "detected_conflict": None,
+        }
+    return {
+        "meta": {"sync_version": "1.0", "source": "pi5_dashboard",
+                 "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                 "device": "Raspberry_Pi_5"},
+        "pins": pins,
+        "system": {"cpu_temp_c": cpu_temp_c},
+    }
 
 
 def load_pin_labels(path: Path = LABELS_FILE) -> dict[int, str]:
@@ -304,6 +383,9 @@ class ShieldStudio:
         self.states: dict[int, dict[str, str]] = {}
         self.selected = PINS[10]  # GPIO17, physical pin 11
         self.pin_labels = load_pin_labels()
+        self.design_intent: dict[int, dict[str, object]] = {}
+        self.design_signature: tuple[int, int] | None = None
+        self.bridge_job: str | None = None
         self.label_var = tk.StringVar(value=self.pin_labels.get(self.selected.number, ""))
         self.led: LED | None = None
         self.badges: dict[int, tuple[int, int]] = {}
@@ -320,6 +402,7 @@ class ShieldStudio:
         self.system_items: dict[str, int] = {}
         self.blink_seconds = tk.DoubleVar(value=0.5)
         self.build_ui()
+        self.poll_design_intent()
         self.refresh()
         self.start_system_refresh()
         self.start_radio_scan()
@@ -359,6 +442,23 @@ class ShieldStudio:
                  bg=CARD, fg=TEXT, troughcolor="#2a3b4f", activebackground=TEAL,
                  highlightthickness=0, bd=0, length=180, showvalue=False,
                  sliderlength=16).pack()
+
+        bridge_control = tk.Frame(header, bg=CARD, highlightbackground=CARD_BORDER,
+                                  highlightthickness=1)
+        bridge_control.pack(side="right", padx=(0, 10))
+        self.bridge_status = tk.Label(bridge_control, text="Waiting for design intent",
+                                      bg=CARD, fg=MUTED, font=("DejaVu Sans", 8),
+                                      width=33, anchor="w")
+        self.bridge_status.pack(anchor="w", padx=10, pady=(7, 3))
+        bridge_actions = tk.Frame(bridge_control, bg=CARD)
+        bridge_actions.pack(fill="x", padx=10, pady=(0, 7))
+        tk.Button(bridge_actions, text="IMPORT DESIGN", command=lambda: self.poll_design_intent(True),
+                  bg="#2a3b4f", fg=TEXT, relief="flat", bd=0,
+                  font=("DejaVu Sans", 8, "bold")).pack(side="left", fill="x", expand=True, ipady=3)
+        tk.Button(bridge_actions, text="EXPORT BENCH", command=self.export_bench,
+                  bg=TEAL, fg="#08201f", relief="flat", bd=0,
+                  font=("DejaVu Sans", 8, "bold")).pack(side="left", fill="x", expand=True,
+                                                      padx=(6, 0), ipady=3)
 
         body = tk.Frame(self.root, bg=BG)
         body.pack(fill="both", expand=True, padx=25, pady=(0, 10))
@@ -796,12 +896,56 @@ class ShieldStudio:
                                      fg=MUTED)
         self.update_selected()
 
+    def poll_design_intent(self, force: bool = False) -> None:
+        try:
+            stat = DESIGN_FILE.stat()
+            signature = (stat.st_mtime_ns, stat.st_size)
+            if force or signature != self.design_signature:
+                incoming = load_design_intent()
+                self.design_intent = incoming
+                self.design_signature = signature
+                for pin in PINS:
+                    self.render_pin_label(pin)
+                self.update_selected()
+                self.bridge_status.configure(
+                    text=f"Design loaded: {len(incoming)} pins · {datetime.now():%H:%M:%S}", fg=HIGH)
+        except FileNotFoundError:
+            if self.design_signature is not None:
+                self.design_intent = {}
+                self.design_signature = None
+                for pin in PINS:
+                    self.render_pin_label(pin)
+                self.update_selected()
+            self.bridge_status.configure(text="Waiting for design_intent.json", fg=MUTED)
+        except (OSError, ValueError, UnicodeError) as exc:
+            self.bridge_status.configure(text=f"Design error: {exc}", fg=ERROR)
+        if self.bridge_job is not None:
+            self.root.after_cancel(self.bridge_job)
+        self.bridge_job = self.root.after(2000, self.poll_design_intent)
+
+    def export_bench(self) -> None:
+        try:
+            states = read_gpio_states()
+            temperature = read_file("/sys/class/thermal/thermal_zone0/temp")
+            try:
+                temp_c = int(temperature) / 1000
+            except ValueError:
+                temp_c = None
+            snapshot = build_bench_snapshot(states, self.pin_labels,
+                                            self.design_intent, temp_c)
+            write_json_atomic(SNAPSHOT_FILE, snapshot)
+            self.bridge_status.configure(text=f"Exported 40 pins · {datetime.now():%H:%M:%S}",
+                                         fg=HIGH)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            self.bridge_status.configure(text=f"Export error: {exc}", fg=ERROR)
+
     def render_pin_label(self, pin: Pin) -> None:
         y = 105 + ((pin.number - 1) // 2) * 29.5
         silk = self.silk_items[pin.number]
         custom = self.custom_items[pin.number]
         x = self.canvas.coords(silk)[0]
-        label = self.pin_labels.get(pin.number, "")
+        label = self.pin_labels.get(pin.number) or str(
+            self.design_intent.get(pin.number, {}).get("custom_label", ""))
         if label:
             short = label if len(label) <= 17 else label[:16] + "…"
             self.canvas.coords(silk, x, y-6)
@@ -859,6 +1003,19 @@ class ShieldStudio:
             if pin.number in (27, 28):
                 detail += "\nReserved for HAT identification on many boards."
         self.selected_detail.configure(text=detail)
+        intent = self.design_intent.get(pin.number)
+        if intent:
+            summary = " · ".join(str(intent[key]) for key in
+                                 ("bom_component_name", "project_id") if intent.get(key))
+            binding = " · ".join(str(intent[key]) for key in
+                                 ("direction", "voltage_logic", "code_variable") if intent.get(key))
+            warning = str(intent.get("safety_warning", ""))
+            extra = "\nDESIGN  " + (summary[:68] or "Pin mapped by Maker Bot")
+            if binding:
+                extra += "\n" + binding[:68]
+            if warning:
+                extra += "\n⚠ " + warning[:85]
+            self.selected_detail.configure(text=detail + extra)
 
     def change_speed(self, _value: str) -> None:
         seconds = self.blink_seconds.get()
@@ -901,6 +1058,8 @@ class ShieldStudio:
         self.system_executor.shutdown(wait=False, cancel_futures=True)
         if self.radio_job is not None:
             self.root.after_cancel(self.radio_job)
+        if self.bridge_job is not None:
+            self.root.after_cancel(self.bridge_job)
         self.radio_executor.shutdown(wait=False, cancel_futures=True)
         self.stop_blink()
         self.root.destroy()

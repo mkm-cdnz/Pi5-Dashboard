@@ -1,4 +1,5 @@
 import tempfile
+import json
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -25,6 +26,31 @@ class DashboardDataTests(unittest.TestCase):
             dashboard.split_nmcli_fields(r"*:Workshop\:Lab:78:WPA2"),
             ["*", "Workshop:Lab", "78", "WPA2"],
         )
+
+    def test_design_import_checks_physical_and_bcm_mapping(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "design.json"
+            payload = {"meta": {"sync_version": "1.0", "source": "maker_bot_ssot"},
+                       "pins": {"11": {"bcm": 17, "custom_label": "STATUS_LED",
+                                       "safety_warning": "Use a resistor"}}}
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            self.assertEqual(dashboard.load_design_intent(path)[11]["custom_label"],
+                             "STATUS_LED")
+            payload["pins"]["11"]["bcm"] = 18
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                dashboard.load_design_intent(path)
+
+    def test_snapshot_preserves_user_and_design_labels_without_inventing_hardware(self):
+        states = {17: {"function": "op", "pull": "pn", "level": "hi"}}
+        snapshot = dashboard.build_bench_snapshot(
+            states, {11: "Bench LED"}, {11: {"custom_label": "Designed LED"}}, 42.5)
+        self.assertEqual(snapshot["pins"]["11"]["live_logic_level"], 1)
+        self.assertEqual(snapshot["pins"]["11"]["user_override_label"], "Bench LED")
+        self.assertEqual(snapshot["pins"]["11"]["design_label"], "Designed LED")
+        self.assertIsNone(snapshot["pins"]["11"]["hardware_connected"])
+        self.assertIsNone(snapshot["pins"]["9"]["live_logic_level"])
+        self.assertEqual(len(snapshot["pins"]), 40)
 
     def test_bluetooth_list_only_contains_freshly_seen_devices(self):
         def fake_run(args, timeout=1.5):

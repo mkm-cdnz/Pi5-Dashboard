@@ -7,6 +7,8 @@ __pycache__/
 *.jpeg
 *.pdf
 pin_labels.json
+design_intent.json
+bench_snapshot.json
 *.pem
 *.key
 id_*
