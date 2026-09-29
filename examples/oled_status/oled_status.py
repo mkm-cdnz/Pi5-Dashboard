@@ -64,6 +64,8 @@ def wifi_status() -> tuple[str, str]:
 
 
 def load_font(size: int) -> ImageFont.ImageFont:
+    from PIL import ImageFont
+
     for candidate in (
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -76,6 +78,8 @@ def load_font(size: int) -> ImageFont.ImageFont:
 
 
 def draw_status(device, fonts: tuple[ImageFont.ImageFont, ImageFont.ImageFont]) -> None:
+    from luma.core.render import canvas
+
     small, large = fonts
     now = time.localtime()
     temperature = cpu_temperature()
@@ -116,9 +120,7 @@ def main() -> int:
 
     try:
         from luma.core.interface.serial import i2c
-        from luma.core.render import canvas
         from luma.oled.device import sh1106, ssd1306
-        from PIL import ImageFont
     except ImportError as exc:
         raise SystemExit(
             "OLED dependencies are missing. Install them with "
