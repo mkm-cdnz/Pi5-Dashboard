@@ -9,6 +9,7 @@ A local desktop dashboard for a Raspberry Pi 5 connected to a Keyestudio T-type 
 - CPU temperature, RAM and microSD use, Wi-Fi and Bluetooth state, both HDMI outputs, USB root-attached devices, Ethernet link, power/throttling flags, uptime, and I²C/SPI device-node counts.
 - Nearby Wi-Fi networks and Bluetooth devices, including those **not connected**. Connected entries are highlighted. The Bluetooth list contains devices seen during the latest bounded scan, rather than every device in BlueZ's cache.
 - A Maker Bot bridge for importing circuit design intent and exporting an offline bench snapshot.
+- A standalone 128×64 I²C OLED status display example, with breadboard wiring steps, in [`examples/oled_status`](examples/oled_status/README.md).
 
 The Pi drawing is a schematic, based on the [Raspberry Pi 5 product brief](https://datasheets.raspberrypi.com/rpi5/raspberry-pi-5-product-brief.pdf). The shield labels follow the Keyestudio T-type board silkscreen. Power and ground labels are nominal pin functions, not voltage measurements. USB devices are counted at their root connection and are not mapped to individual physical sockets. `No throttle flags` reflects `vcgencmd get_throttled`; it is not a voltage measurement.
 
